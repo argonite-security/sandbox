@@ -16,6 +16,7 @@ from .sinkhole import Sinkhole
 IMAGE = 'argonite-sandbox'
 NAME = 'argonite-sbx'
 UID = 10001
+X_UID = 10002
 HOST_IP, GUEST_IP = '10.213.0.1', '10.213.0.2'
 VETH_HOST, VETH_GUEST = 'sbxh', 'sbxg'
 GUEST_HOME = '/home/player'
@@ -23,6 +24,7 @@ AUDIT_LOG = Path('/var/log/audit/audit.log')
 # Programs the game, the X server and system-info libraries run on their own.
 EXPECTED_EXEC = {'java', 'xvfb', 'xkbcomp', 'sleep', 'jspawnhelper', 'xrandr', 'getconf', 'uname', 'lsb_release', 'lspci', 'lshw', 'dmidecode', 'udevadm', 'nproc', 'glxinfo'}
 DELETE_SYSCALLS = {'87', '263', '82', '264', '316'}  # unlink, unlinkat, rename, renameat, renameat2 (x86_64)
+HEX_FIELDS = re.compile(r'^(a\d+|name|exe|comm|proctitle|cwd|path)$')
 FIELD = re.compile(r'(\w+)=("([^"]*)"|(\S+))')
 
 
@@ -54,7 +56,10 @@ def parse_audit(text: str, since: float) -> dict[str, list[dict]]:
             continue
         rec = {'type': m.group(1)}
         for f in FIELD.finditer(m.group(4)):
-            rec.setdefault(f.group(1), _decode(f.group(4), f.group(3)))
+            key = f.group(1)
+            # Only text fields can be hex-encoded; numbers like argc=13 must stay numbers.
+            value = _decode(f.group(4), f.group(3)) if HEX_FIELDS.match(key) else (f.group(3) if f.group(3) is not None else f.group(4))
+            rec.setdefault(key, value)
         events.setdefault(m.group(3), []).append(rec)
     return events
 
@@ -126,7 +131,9 @@ class LinuxSession(Session):
             if b.path.exists():
                 sh('auditctl', '-w', str(b.path), '-p', 'rwa', '-k', 'sbx_bait')
         sh('auditctl', '-e', '1')
-        sh('docker', 'exec', '-d', '-u', str(UID), NAME, 'Xvfb', ':99', '-screen', '0', '1280x720x24', '-nolisten', 'tcp')
+        # The virtual screen runs as its own user, so its helper programs (keymap compiler) aren't
+        # mistaken for something the code under test started.
+        sh('docker', 'exec', '-d', '-u', str(X_UID), NAME, 'Xvfb', ':99', '-screen', '0', '1280x720x24', '-nolisten', 'tcp', '-ac')
         time.sleep(2)
         log('container isolated, pid', pid)
 

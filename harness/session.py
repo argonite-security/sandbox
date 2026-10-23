@@ -14,7 +14,7 @@ from pathlib import Path
 
 from . import api
 from .bait import Bait, plant
-from .common import Unsupported, added, changed, download, empty_report, jar_hosts, jar_meta, log, snapshot, tail, wait_for
+from .common import Unsupported, added, changed, download, empty_report, file_hash, jar_hosts, jar_meta, log, snapshot, tail, wait_for
 from .games import Plan, plan as make_plan
 from .install import gather_dependencies, install_curseforge, install_pack, install_server
 from .launcher import client_command, install_client
@@ -222,9 +222,21 @@ class Session:
     def home_roots(self) -> list[Path]:
         return [self.home]
 
+    # True when home is the machine's real user folder (Windows, macOS), which holds gigabytes of
+    # preinstalled tools; its top level is then checked file by file instead of as a whole tree.
+    real_home = False
+
     def home_snapshot(self) -> dict[str, str]:
         out: dict[str, str] = {}
         for r in self.home_roots():
+            if self.real_home and r == self.home:
+                for p in r.iterdir():
+                    try:
+                        if p.is_file() and not p.is_symlink() and p.stat().st_size < 10_000_000:
+                            out[str(p)] = file_hash(p)
+                    except OSError:
+                        continue
+                continue
             out.update(snapshot(r, everything=True))
         return out
 

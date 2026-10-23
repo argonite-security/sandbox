@@ -36,7 +36,11 @@ NS = '{http://schemas.microsoft.com/win/2004/08/events/event}'
 
 
 def ps(script: str, check: bool = True) -> str:
-    out = subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], capture_output=True, text=True)
+    # The workflow step runs in PowerShell 7, whose module path breaks Windows PowerShell's own modules
+    # (Get-Acl, the firewall cmdlets), so the child starts with the system default instead.
+    env = {k: v for k, v in os.environ.items() if k.upper() != 'PSMODULEPATH'}
+    exe = str(SYS32 / 'WindowsPowerShell' / 'v1.0' / 'powershell.exe')
+    out = subprocess.run([exe, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], capture_output=True, text=True, env=env)
     if check and out.returncode != 0:
         raise RuntimeError(f'powershell: {out.stderr.strip()[:300]}')
     return out.stdout
@@ -78,6 +82,7 @@ def pid_of(v: str) -> int:
 
 class WindowsSession(Session):
     os_key = 'windows'
+    real_home = True
 
     def __init__(self, run_info: dict, root: Path):
         super().__init__(run_info, root)

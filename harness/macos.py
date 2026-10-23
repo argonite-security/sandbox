@@ -34,6 +34,7 @@ def sh(*cmd: str, check: bool = True) -> str:
 
 class MacSession(Session):
     os_key = 'macos'
+    real_home = True
 
     def __init__(self, run_info: dict, root: Path):
         super().__init__(run_info, root)
