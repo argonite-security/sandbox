@@ -1,7 +1,7 @@
 # Argonite behaviour tests
 
-Before a mod, plugin or modpack goes live on [Argonite](https://argonite.org), it is run inside real
-Minecraft on fresh GitHub-hosted Linux, Windows and macOS machines:
+When a moderator on [Argonite](https://argonite.org) asks for it, a mod, plugin or modpack is run
+inside real Minecraft on fresh GitHub-hosted Linux, Windows and macOS machines:
 
 - the server is installed with the file's loader, the file and its required dependencies are added,
   and a game client joins the server;
