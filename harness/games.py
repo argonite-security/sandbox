@@ -23,6 +23,7 @@ class Plan:
     java: int = 21
     client: bool = True
     pack: dict | None = None
+    pack_format: str | None = None  # mrpack | curseforge
     notes: list[str] = field(default_factory=list)
 
 
@@ -60,7 +61,7 @@ def neoforge_version(mc: str) -> str | None:
 
 
 def forge_version(mc: str) -> str | None:
-    promos = get_json('https://maven.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json')['promos']  # type: ignore[index]
+    promos = get_json('https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json')['promos']  # type: ignore[index]
     return promos.get(f'{mc}-recommended') or promos.get(f'{mc}-latest')
 
 
@@ -78,7 +79,7 @@ def loader_version(loader: str, mc: str) -> str | None:
             return neoforge_version(mc)
         if loader == 'forge':
             t = mc_tuple(mc)
-            return forge_version(mc) if t and t >= (1, 12, 2) else None
+            return forge_version(mc) if t and t >= (1, 7, 10) else None
         if loader == 'paper':
             build = get_json(f'https://fill.papermc.io/v3/projects/paper/versions/{mc}/builds/latest')
             return str(build['id'])  # type: ignore[index]
@@ -91,25 +92,40 @@ def loader_version(loader: str, mc: str) -> str | None:
     return None
 
 
-def _pack_index(path: Path) -> dict:
+def _pack_index(path: Path) -> tuple[str, dict]:
     try:
         with zipfile.ZipFile(path) as z:
-            return json.loads(z.read('modrinth.index.json'))
-    except (KeyError, zipfile.BadZipFile, ValueError) as e:
-        raise Unsupported('only Modrinth-format modpacks (.mrpack) can be run') from e
+            names = set(z.namelist())
+            if 'modrinth.index.json' in names:
+                return 'mrpack', json.loads(z.read('modrinth.index.json'))
+            if 'manifest.json' in names:
+                return 'curseforge', json.loads(z.read('manifest.json'))
+    except (zipfile.BadZipFile, ValueError) as e:
+        raise Unsupported('the modpack file could not be read') from e
+    raise Unsupported('the modpack has neither a modrinth.index.json nor a CurseForge manifest.json')
 
 
 def plan(project_type: str, loaders: list[str], game_versions: list[str], file: Path) -> Plan:
     if project_type == 'modpack':
-        index = _pack_index(file)
+        fmt, index = _pack_index(file)
+        if fmt == 'curseforge':
+            mc_info = index.get('minecraft') or {}
+            mc = mc_info.get('version')
+            if not mc:
+                raise Unsupported('the modpack does not name a game version')
+            for entry in mc_info.get('modLoaders') or []:
+                name, _, version = str(entry.get('id', '')).partition('-')
+                if name in ('forge', 'neoforge', 'fabric', 'quilt'):
+                    return Plan('mods', name, mc, version, java_for(mc), pack=index, pack_format=fmt)
+            return Plan('mods', 'vanilla', mc, mc, java_for(mc), pack=index, pack_format=fmt)
         deps = index.get('dependencies') or {}
         mc = deps.get('minecraft')
         if not mc:
             raise Unsupported('the modpack does not name a game version')
         for key, loader in (('fabric-loader', 'fabric'), ('quilt-loader', 'quilt'), ('neoforge', 'neoforge'), ('forge', 'forge')):
             if key in deps:
-                return Plan('mods', loader, mc, str(deps[key]), java_for(mc), pack=index)
-        return Plan('mods', 'vanilla', mc, mc, java_for(mc), pack=index)
+                return Plan('mods', loader, mc, str(deps[key]), java_for(mc), pack=index, pack_format=fmt)
+        return Plan('mods', 'vanilla', mc, mc, java_for(mc), pack=index, pack_format=fmt)
 
     if project_type == 'plugin':
         wanted = [PLUGIN_LOADERS[l] for l in loaders if l in PLUGIN_LOADERS]
@@ -133,10 +149,5 @@ def plan(project_type: str, loaders: list[str], game_versions: list[str], file: 
             v = loader_version(loader, mc)
             log('loader', loader, mc, '->', v)
             if v:
-                p = Plan('mods', loader, mc, v, java_for(mc))
-                t = mc_tuple(mc)
-                if loader == 'forge' and t and t < (1, 13, 0):
-                    p.client = False
-                    p.notes.append('the game client is not run for Forge before 1.13')
-                return p
+                return Plan('mods', loader, mc, v, java_for(mc))
     raise Unsupported('none of the declared loaders support the declared game versions')

@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import sys
+import threading
 import time
 import tomllib
 import urllib.error
@@ -58,7 +59,7 @@ def download(url: str, dest: Path, sha1: str | None = None, sha256: str | None =
     if urllib.parse.urlsplit(url).scheme != 'https':
         raise RuntimeError(f'refusing non-https download: {url}')
     dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_name(dest.name + '.part')
+    tmp = dest.with_name(f'{dest.name}.{os.getpid()}.{threading.get_ident()}.part')
     for attempt in range(4):
         try:
             hashes = {n: hashlib.new(n) for n, _ in want}
@@ -85,8 +86,9 @@ def download(url: str, dest: Path, sha1: str | None = None, sha256: str | None =
 
 def download_many(items: list[tuple[str, Path, str | None]], workers: int = 16) -> None:
     """(url, dest, sha1) triples, in parallel."""
+    unique = {str(d): (u, d, s) for u, d, s in items}  # the same file can be listed under two names
     with ThreadPoolExecutor(workers) as pool:
-        for f in [pool.submit(download, u, d, s) for u, d, s in items]:
+        for f in [pool.submit(download, u, d, s) for u, d, s in unique.values()]:
             f.result()
 
 
@@ -189,6 +191,17 @@ def jar_meta(path: Path) -> dict:
                     required = dep.get('type', '').lower() == 'required' if 'type' in dep else dep.get('mandatory') is True
                     if required and dep.get('side', 'BOTH').upper() != 'CLIENT':
                         meta['requires'].append(str(dep.get('modId', '')))
+        if (t := read('mcmod.info')) is not None:
+            try:
+                d = json.loads(t, strict=False)
+                mods = d.get('modList', []) if isinstance(d, dict) else d
+                for m in mods if isinstance(mods, list) else []:
+                    if isinstance(m, dict):
+                        meta['ids'].append(str(m.get('modid', '')))
+                        meta['names'].append(str(m.get('name', '')))
+                        meta['requires'] += [str(x).split('@')[0] for x in m.get('requiredMods') or [] if isinstance(x, str)]
+            except ValueError:
+                pass
         for yml in ('plugin.yml', 'paper-plugin.yml', 'velocity-plugin.json'):
             if (t := read(yml)) is None:
                 continue
@@ -283,6 +296,7 @@ def empty_report() -> dict:
         'persistence': [],
         'writtenOutside': [],
         'depHosts': [],
+        'watched': 0,
         'log': '',
     }
 

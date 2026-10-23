@@ -8,7 +8,7 @@ import urllib.parse
 import zipfile
 from pathlib import Path, PurePosixPath
 
-from . import api
+from . import api, forge
 from .common import Unsupported, download, file_hash, get_json, is_windows, jar_hosts, jar_meta, log
 from .games import Plan, mc_tuple
 
@@ -42,11 +42,11 @@ def install_server(srv: Path, plan: Plan, java: str, cache: Path) -> list[str]:
         _run([java, '-jar', str(jar), 'install', 'server', mc, v, '--download-server', f'--install-dir={srv}'], srv, 'quilt installer')
         cmd = [java, *mem, '-jar', 'quilt-server-launch.jar', 'nogui']
     elif plan.loader in ('neoforge', 'forge'):
-        neo = plan.loader == 'neoforge'
-        full = v if neo else f'{mc}-{v}'
-        base = 'https://maven.neoforged.net/releases/net/neoforged/neoforge' if neo else 'https://maven.minecraftforge.net/net/minecraftforge/forge'
-        name = 'neoforge' if neo else 'forge'
-        jar = download(f'{base}/{full}/{name}-{full}-installer.jar', cache / f'{name}-{full}-installer.jar')
+        name = plan.loader
+        jar = forge.installer(name, mc, v, cache)
+        profile = forge.legacy_profile(jar)
+        if profile:
+            return _finish(srv, plan, forge.legacy_server(srv, jar, profile, java, mem))
         _run([java, '-jar', str(jar), '--installServer', str(srv)], srv, f'{name} installer')
         args = sorted(srv.glob(f'libraries/net/*/*/*/{"win" if is_windows() else "unix"}_args.txt'))
         shims = sorted(srv.glob('forge-*-shim.jar'))
@@ -81,6 +81,11 @@ def install_server(srv: Path, plan: Plan, java: str, cache: Path) -> list[str]:
         cmd = [java, *mem, '-jar', 'server.jar', 'nogui']
     else:
         raise Unsupported(f'unknown loader {plan.loader}')
+    return _finish(srv, plan, cmd)
+
+
+def _finish(srv: Path, plan: Plan, cmd: list[str]) -> list[str]:
+    mc = plan.mc
     if plan.loader != 'velocity':
         (srv / 'eula.txt').write_text('eula=true\n')
         flat = 'minecraft\\:flat' if (mc_tuple(mc) or (99, 0, 0)) >= (1, 19, 0) else 'FLAT'
@@ -135,6 +140,44 @@ def install_pack(pack_file: Path, index: dict, server_dir: Path | None, client_d
                 if d:
                     (d / rel).parent.mkdir(parents=True, exist_ok=True)
                     (d / rel).write_bytes(z.read(info))
+    return notes
+
+
+def install_curseforge(pack_file: Path, manifest: dict, server_dir: Path | None, client_dir: Path | None, lookup) -> list[str]:
+    """Downloads a CurseForge pack's files (checking their SHA-1s) and unpacks its overrides."""
+    notes = []
+    entries = [f for f in manifest.get('files') or [] if isinstance(f, dict) and isinstance(f.get('fileID'), int)]
+    if len(entries) > MAX_PACK_FILES:
+        raise Unsupported('the modpack has too many files to run')
+    info = lookup([f['fileID'] for f in entries])
+    if entries and not info:
+        raise Unsupported('CurseForge files could not be looked up')
+    missing = 0
+    for f in entries:
+        i = info.get(str(f['fileID']))
+        if not i or not i.get('url') or not i.get('sha1') or f.get('required') is False:
+            missing += 1
+            continue
+        rel = _safe_rel(f"{i.get('folder') or 'mods'}/{Path(i['name']).name}")
+        targets = [d for d, side in ((server_dir, 'server'), (client_dir, 'client')) if d and i.get(side, True)]
+        if not rel or not targets:
+            continue
+        first = download(i['url'], targets[0] / rel, sha1=i['sha1'])
+        for t in targets[1:]:
+            (t / rel).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(first, t / rel)
+    if missing:
+        notes.append(f'{missing} pack files could not be downloaded (their authors don’t allow it) or are optional')
+    overrides = str(manifest.get('overrides') or 'overrides').strip('/')
+    with zipfile.ZipFile(pack_file) as z:
+        for entry in z.infolist():
+            if entry.is_dir() or not entry.filename.startswith(overrides + '/'):
+                continue
+            rel = _safe_rel(entry.filename[len(overrides) + 1 :])
+            for d in (server_dir, client_dir):
+                if d and rel:
+                    (d / rel).parent.mkdir(parents=True, exist_ok=True)
+                    (d / rel).write_bytes(z.read(entry))
     return notes
 
 

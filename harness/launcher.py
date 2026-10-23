@@ -110,11 +110,17 @@ def install_client(root: Path, loader: str, mc: str, loader_version: str, java: 
         (root / 'versions' / vid).mkdir(parents=True, exist_ok=True)
         (root / 'versions' / vid / f'{vid}.json').write_text(json.dumps(profile), 'utf-8')
     else:
-        group = 'net/neoforged/neoforge' if loader == 'neoforge' else 'net/minecraftforge/forge'
-        full = loader_version if loader == 'neoforge' else f'{mc}-{loader_version}'
-        name = 'neoforge' if loader == 'neoforge' else 'forge'
-        repo = 'https://maven.neoforged.net/releases' if loader == 'neoforge' else 'https://maven.minecraftforge.net'
-        installer = download(f'{repo}/{group}/{full}/{name}-{full}-installer.jar', root.parent / 'cache' / f'{name}-{full}-installer.jar')
+        from . import forge
+
+        name = loader
+        installer = forge.installer(loader, mc, loader_version, root.parent / 'cache')
+        legacy = forge.legacy_profile(installer)
+        if legacy:
+            vid = forge.legacy_client(root, installer, legacy)
+            data = load_version(root, vid)
+            _fetch_libraries(root, data)
+            _fetch_assets(root, data)
+            return vid
         profiles = root / 'launcher_profiles.json'
         if not profiles.exists():
             profiles.write_text('{"profiles":{}}', 'utf-8')

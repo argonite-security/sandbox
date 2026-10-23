@@ -42,6 +42,11 @@ def submit(run_id: str, claim_token: str, report: dict) -> dict:
     return _post('/internal/sandbox/result', {'run': run_id, 'claimToken': claim_token, 'report': report})
 
 
+def curseforge_files(run_id: str, claim_token: str, ids: list[int]) -> dict:
+    """Names, links, SHA-1s and sides of CurseForge files, looked up by the site (which holds the API key)."""
+    return _post('/internal/sandbox/curseforge', {'run': run_id, 'claimToken': claim_token, 'files': ids}).get('files') or {}
+
+
 def resolve(version_id: str, loader: str, game_version: str) -> dict:
     q = urllib.parse.urlencode({'loader': loader, 'gameVersion': game_version})
     return json.loads(request(f'{API}/v1/versions/{version_id}/resolve?{q}', headers={'Accept': 'application/json'}))

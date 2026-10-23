@@ -16,16 +16,20 @@ from . import api
 from .bait import Bait, plant
 from .common import Unsupported, added, changed, download, empty_report, jar_hosts, jar_meta, log, snapshot, tail, wait_for
 from .games import Plan, plan as make_plan
-from .install import gather_dependencies, install_pack, install_server
+from .install import gather_dependencies, install_curseforge, install_pack, install_server
 from .launcher import client_command, install_client
 
-SERVER_START_S = 600
-CLIENT_JOIN_S = 420
-DWELL_S = 120
+SERVER_START_S = 900
+CLIENT_JOIN_S = 900
+# How long to keep watching once the game is up: three times as long as this file took to boot into a
+# world (slow-starting packs get longer), but at least 5 and at most 20 minutes.
+DWELL_FACTOR = 3
+DWELL_MIN_S = 300
+DWELL_MAX_S = 1200
 STOP_S = 60
 DONE = re.compile(r'Done \(\d|Done!|Done in \d')
 JOINED = re.compile(r'joined the game|logged in with entity id')
-CRASHED = re.compile(r'---- Minecraft Crash Report ----|#@!@# Game crashed|Incompatible mods? (found|set)|Failed to start the minecraft server|Encountered an unexpected exception|Mod loading has failed|Loading errors encountered')
+CRASHED = re.compile(r'#@!@# Game crashed|Exception in server tick loop|This crash report has been saved to|Incompatible mods? (found|set)|Failed to start the minecraft server|Encountered an unexpected exception|Mod loading has failed|Loading errors encountered')
 
 
 def loaded(text: str, meta: dict) -> bool:
@@ -33,7 +37,8 @@ def loaded(text: str, meta: dict) -> bool:
     for mod_id in meta['ids']:
         e = re.escape(mod_id)
         # Fabric/Quilt list "- modid 1.2.3" under "Loading N mods:"; Forge/NeoForge name it in their mod-file and container lines.
-        if re.search(rf'(?m)^\s*[|\\ ]*-\s+{e}\s', text) or re.search(rf'(?i)(Found valid mod file .*with \{{{e}\}}|ModContainer[^\n]*\b{e}\b|\bmods?\b[^\n]{{0,40}}\b{e}\b[^\n]*(loaded|constructed))', text):
+        listed = rf'(?i)mods \[(?:[^\]\n]*, )?{e}(?:, [^\]\n]*)?\]'  # old FML: "missing mods [mcp, FML, Forge, examplemod]"
+        if re.search(rf'(?m)^\s*[|\\ ]*-\s+{e}\s', text) or re.search(listed, text) or re.search(rf'(?i)(Found valid mod file .*with \{{{e}\}}|ModContainer[^\n]*\b{e}\b|\bmods?\b[^\n]{{0,40}}\b{e}\b[^\n]*(loaded|constructed))', text):
             return not CRASHED.search(text)
     for name in meta['names']:
         if re.search(rf'(?i)(Loading server plugin|Enabling) {re.escape(name)}\b|\[{re.escape(name)}\] (Loading|Enabling)', text):
@@ -52,7 +57,6 @@ def java_home(major: int) -> str:
 
 class Session:
     os_key = 'linux'
-    client_supported = True
 
     def __init__(self, run: dict, root: Path):
         self.run = run
@@ -84,9 +88,10 @@ class Session:
         self.main = main
         self.plan = p = make_plan(self.run['projectType'], self.run['loaders'], self.run['gameVersions'], main)
         self.notes += p.notes
-        if not self.client_supported and p.client:
+        why = self.client_unsupported(p.mc) if p.client else None
+        if why:
             p.client = False
-            self.notes.append('the game client is not run on this system')
+            self.notes.append(f'the game client is not run here: {why}')
         r = self.report['env']
         r['gameVersion'], r['loader'], r['java'] = p.mc, p.loader, str(p.java)
         java = java_home(p.java)
@@ -102,7 +107,11 @@ class Session:
 
         target = 'plugins' if p.kind in ('plugins', 'proxy') else 'mods'
         if p.pack is not None:
-            self.notes += install_pack(main, p.pack, self.server_dir, self.game_dir if p.client else None)
+            if p.pack_format == 'curseforge':
+                lookup = lambda ids: api.curseforge_files(self.run['id'], self.run['claimToken'], ids)  # noqa: E731
+                self.notes += install_curseforge(main, p.pack, self.server_dir, self.game_dir if p.client else None, lookup)
+            else:
+                self.notes += install_pack(main, p.pack, self.server_dir, self.game_dir if p.client else None)
             # The pack's own mods weren't part of the pack file's scan, so their websites count as known here.
             hosts: set[str] = set()
             for d in (self.server_dir / 'mods', self.game_dir / 'mods'):
@@ -143,6 +152,7 @@ class Session:
         try:
             server_log = self.root / 'server.log'
             self.procs['server'] = self.start('server', self.server_cmd, self.server_dir, server_log)
+            boot_start = time.monotonic()
             started = wait_for(server_log, DONE, SERVER_START_S, lambda: self.alive('server'))
             self.report['server']['started'] = started
             log('server started' if started else 'server did not start')
@@ -153,9 +163,12 @@ class Session:
                 joined = started and wait_for(server_log, JOINED, CLIENT_JOIN_S, lambda: self.alive('client') and self.alive('server'))
                 self.report['client']['joined'] = bool(joined)
                 log('client joined' if joined else 'client did not join')
-            deadline = time.monotonic() + DWELL_S
-            while time.monotonic() < deadline and any(self.alive(n) for n in self.procs):
+            dwell = min(DWELL_MAX_S, max(DWELL_MIN_S, DWELL_FACTOR * (time.monotonic() - boot_start)))
+            log(f'booted in {time.monotonic() - boot_start:.0f}s; watching for {dwell:.0f}s')
+            watch_start = time.monotonic()
+            while time.monotonic() < watch_start + dwell and any(self.alive(n) for n in self.procs):
                 time.sleep(2)
+            self.report['watched'] = round(time.monotonic() - watch_start)
             if self.alive('server'):
                 self.send('server', 'stop\n' if p.loader != 'velocity' else 'end\n')
                 end = time.monotonic() + STOP_S
@@ -202,6 +215,9 @@ class Session:
         return path
 
     # ---- Hooks ------------------------------------------------------------------------------
+
+    def client_unsupported(self, mc: str) -> str | None:
+        return None
 
     def home_roots(self) -> list[Path]:
         return [self.home]
