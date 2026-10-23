@@ -1,0 +1,38 @@
+name: Windows
+
+on:
+  repository_dispatch:
+    types: [sandbox-windows]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  test:
+    runs-on: windows-2025
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: |
+            8
+            17
+            21
+            25
+
+      - name: Test
+        env:
+          RUN_ID: ${{ github.event.client_payload.run }}
+          RUN_NONCE: ${{ github.event.client_payload.nonce }}
+          ARGONITE_API: https://api.argonite.org
+        run: python -I run.py windows --run "$env:RUN_ID"
