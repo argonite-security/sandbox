@@ -118,6 +118,10 @@ class WindowsSession(Session):
         return e
 
     def isolate(self) -> None:
+        # Everything here was created with admin rights, which the game won't have; give the account
+        # itself (not the Administrators group) write access so the server can save its world and logs.
+        sid = next(csv.reader(io.StringIO(run(str(SYS32 / 'whoami.exe'), '/user', '/fo', 'csv', '/nh'))))[1]
+        run(str(SYS32 / 'icacls.exe'), str(self.root), '/grant', f'*{sid}:(OI)(CI)F', '/T', '/C', '/Q')
         self.since = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.000Z')
         for guid, flags in AUDIT.items():
             run(str(SYS32 / 'auditpol.exe'), '/set', f'/subcategory:{guid}', *flags)

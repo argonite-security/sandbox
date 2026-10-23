@@ -32,6 +32,19 @@ JOINED = re.compile(r'joined the game|logged in with entity id')
 CRASHED = re.compile(r'#@!@# Game crashed|Exception in server tick loop|This crash report has been saved to|Incompatible mods? (found|set)|Failed to start the minecraft server|Encountered an unexpected exception|Mod loading has failed|Loading errors encountered')
 
 
+ERROR_LINE = re.compile(r'(ERROR|FATAL|Exception|Error:|Caused by|Could not|Failed|failed to)', re.I)
+
+
+def diagnose(text: str) -> str:
+    """The most telling lines at the end of a log, for the moderators' view."""
+    lines = [l.strip() for l in text.splitlines() if l.strip() and not l.strip().startswith('at ')]
+    if not lines:
+        return ' (no output)'
+    errors = [l for l in lines if ERROR_LINE.search(l)]
+    picked = (errors or lines)[-2:]
+    return ': ' + ' | '.join(l[:180] for l in picked)
+
+
 def loaded(text: str, meta: dict) -> bool:
     """Whether the loader's own list of loaded mods or plugins names the file."""
     for mod_id in meta['ids']:
@@ -154,6 +167,7 @@ class Session:
             self.procs['server'] = self.start('server', self.server_cmd, self.server_dir, server_log)
             boot_start = time.monotonic()
             started = wait_for(server_log, DONE, SERVER_START_S, lambda: self.alive('server'))
+            booted = time.monotonic() - boot_start if started else None
             self.report['server']['started'] = started
             log('server started' if started else 'server did not start')
             if p.client:
@@ -162,9 +176,11 @@ class Session:
                 self.report['client']['started'] = True
                 joined = started and wait_for(server_log, JOINED, CLIENT_JOIN_S, lambda: self.alive('client') and self.alive('server'))
                 self.report['client']['joined'] = bool(joined)
+                booted = time.monotonic() - boot_start if joined else None
                 log('client joined' if joined else 'client did not join')
-            dwell = min(DWELL_MAX_S, max(DWELL_MIN_S, DWELL_FACTOR * (time.monotonic() - boot_start)))
-            log(f'booted in {time.monotonic() - boot_start:.0f}s; watching for {dwell:.0f}s')
+            # Scaled to how long the game really took to come up; if it never did, the minimum.
+            dwell = DWELL_MIN_S if booted is None else min(DWELL_MAX_S, max(DWELL_MIN_S, DWELL_FACTOR * booted))
+            log(f'booted in {booted:.0f}s; watching for {dwell:.0f}s' if booted is not None else f'did not fully boot; watching for {dwell:.0f}s')
             watch_start = time.monotonic()
             while time.monotonic() < watch_start + dwell and any(self.alive(n) for n in self.procs):
                 time.sleep(2)
@@ -195,6 +211,14 @@ class Session:
                 self.report[side]['crashed'] = True
             if text and (self.main_meta['ids'] or self.main_meta['names']):
                 self.report[side]['loaded'] = loaded(text, self.main_meta)
+        problems = []
+        if not self.report['server']['started']:
+            problems.append(f"the server didn't start{diagnose(texts['server'])}")
+        if self.plan and self.plan.client and not self.report['client']['joined']:
+            problems.append(f"the client didn't join{diagnose(texts['client'])}")
+        if problems:
+            self.report['error'] = '; '.join(problems)[:500]
+            log('problems:', self.report['error'])
         self.report['log'] = '\n'.join([*(f'note: {n}' for n in self.notes), '--- server', tail(logs['server'], 12_000), '--- client', tail(logs['client'], 8_000)])[-30_000:]
         self.report['outcome'] = 'tested'
 

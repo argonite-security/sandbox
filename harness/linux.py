@@ -80,6 +80,12 @@ class LinuxSession(Session):
 
     def isolate(self) -> None:
         sh('chown', '-R', f'{UID}:{UID}', str(self.work), str(self.home))
+        # The exact Java in use, links resolved, mounted at the same path so the commands work unchanged.
+        java = Path(self.java).resolve()
+        jdk = java.parents[1]
+        for cmd in (self.server_cmd, self.client_cmd):
+            if cmd and cmd[0] == self.java:
+                cmd[0] = str(java)
         resolv = self.root / 'resolv.conf'
         resolv.write_text(f'nameserver {HOST_IP}\noptions timeout:2 attempts:1\n')
         sh('docker', 'rm', '-f', NAME, check=False)
@@ -88,7 +94,7 @@ class LinuxSession(Session):
             '--user', f'{UID}:{UID}', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--pids-limit', '2048',
             '--memory', '9g', '--cpus', '3.5', '--shm-size', '512m',
             '-v', f'{self.work}:{self.work}', '-v', f'{self.home}:{GUEST_HOME}', '-v', f'{resolv}:/etc/resolv.conf:ro',
-            '-v', '/opt/hostedtoolcache:/opt/hostedtoolcache:ro',
+            '-v', '/opt/hostedtoolcache:/opt/hostedtoolcache:ro', '-v', f'{jdk}:{jdk}:ro',
             '-e', f'HOME={GUEST_HOME}', '-e', 'USER=player', '-e', 'DISPLAY=:99', '-e', 'XDG_CACHE_HOME=/tmp/cache',
             '-e', 'MESA_SHADER_CACHE_DISABLE=true', '-e', 'LIBGL_ALWAYS_SOFTWARE=1', '-e', 'GALLIUM_DRIVER=llvmpipe', '-e', 'TZ=UTC',
             IMAGE, 'sleep', 'infinity',
@@ -135,7 +141,7 @@ class LinuxSession(Session):
         # mistaken for something the code under test started.
         sh('docker', 'exec', '-d', '-u', str(X_UID), NAME, 'Xvfb', ':99', '-screen', '0', '1280x720x24', '-nolisten', 'tcp', '-ac')
         time.sleep(2)
-        log('container isolated, pid', pid)
+        log('container isolated, pid', pid, 'java', java)
 
     def start(self, name: str, cmd: list[str], cwd: Path, log_path: Path) -> object:
         out = open(log_path, 'wb')
