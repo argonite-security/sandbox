@@ -22,6 +22,15 @@ VETH_HOST, VETH_GUEST = 'sbxh', 'sbxg'
 GUEST_HOME = '/home/player'
 AUDIT_LOG = Path('/var/log/audit/audit.log')
 # Programs the game, the X server and system-info libraries run on their own.
+# Exact command lines Java and its libraries run on their own (library lookup, user id, system info).
+EXPECTED_COMMANDS = re.compile(
+    r'^((/usr)?/bin/(da)?sh )?(/usr)?/s?bin/ldconfig(\.real)? -p$'
+    r'|^(/usr)?/bin/id( -[ugGnr]+)*$'
+    r'|^(/usr)?/bin/uname( -[a-z]+)*$'
+    r'|^(/usr)?/bin/getconf [A-Z_]+$'
+    r'|^(/usr)?/bin/lsb_release( -[a-z]+)*$'
+)
+HOSTNAME = 'desktop-7f3k2'
 EXPECTED_EXEC = {'java', 'xvfb', 'xkbcomp', 'sleep', 'jspawnhelper', 'xrandr', 'getconf', 'uname', 'lsb_release', 'lspci', 'lshw', 'dmidecode', 'udevadm', 'nproc', 'glxinfo'}
 DELETE_SYSCALLS = {'87', '263', '82', '264', '316'}  # unlink, unlinkat, rename, renameat, renameat2 (x86_64)
 HEX_FIELDS = re.compile(r'^(a\d+|name|exe|comm|proctitle|cwd|path)$')
@@ -83,6 +92,7 @@ class LinuxSession(Session):
         # The exact Java in use, links resolved, mounted at the same path so the commands work unchanged.
         java = Path(self.java).resolve()
         jdk = java.parents[1]
+        self.jdk = jdk
         for cmd in (self.server_cmd, self.client_cmd):
             if cmd and cmd[0] == self.java:
                 cmd[0] = str(java)
@@ -90,7 +100,7 @@ class LinuxSession(Session):
         resolv.write_text(f'nameserver {HOST_IP}\noptions timeout:2 attempts:1\n')
         sh('docker', 'rm', '-f', NAME, check=False)
         sh(
-            'docker', 'run', '-d', '--name', NAME, '--hostname', 'desktop-7f3k2', '--network', 'none',
+            'docker', 'run', '-d', '--name', NAME, '--hostname', HOSTNAME, '--add-host', f'{HOSTNAME}:127.0.1.1', '--network', 'none',
             '--user', f'{UID}:{UID}', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--pids-limit', '2048',
             '--memory', '9g', '--cpus', '3.5', '--shm-size', '512m',
             '-v', f'{self.work}:{self.work}', '-v', f'{self.home}:{GUEST_HOME}', '-v', f'{resolv}:/etc/resolv.conf:ro',
@@ -184,7 +194,7 @@ class LinuxSession(Session):
                 args = ' '.join(ex.get(f'a{i}', '') for i in range(min(argc, 20)))
                 exe = sc.get('exe', '') or args.split(' ')[0]
                 base = exe.rsplit('/', 1)[-1].lower()
-                if base in EXPECTED_EXEC or exe in seen_exec:
+                if base in EXPECTED_EXEC or EXPECTED_COMMANDS.match(args) or exe in seen_exec:
                     continue
                 seen_exec.add(exe)
                 r['processes'].append({'exe': exe + ('' if sc.get('success') == 'yes' else ' (failed to start)'), 'args': args[:300]})
@@ -198,16 +208,19 @@ class LinuxSession(Session):
                     op = bait_op(sc, p)
                     r['bait'].append({'bait': kind, 'path': self.show(host_path), 'op': op, 'exe': sc.get('exe')})
         # Files the container changed outside its two mounted folders.
+        # Docker creates the folders it mounts into; those and their parents aren't the game's doing.
+        mounts = [str(self.work), GUEST_HOME, '/etc/resolv.conf', '/opt/hostedtoolcache', str(getattr(self, 'jdk', ''))]
+        made_by_docker = lambda p: any(m == p or m.startswith(p.rstrip('/') + '/') for m in mounts if m)  # noqa: E731
         for line in getattr(self, 'diff', '').splitlines():
             kind, _, path = line.partition(' ')
-            if kind not in ('A', 'C') or re.match(r'^/(tmp|var/tmp|dev|run|proc|sys)(/|$)', path):
+            if kind not in ('A', 'C') or re.match(r'^/(tmp|var/tmp|dev|run|proc|sys)(/|$)', path) or made_by_docker(path):
                 continue
             if re.match(r'^/(etc/(cron|profile\.d|systemd|init\.d|xdg/autostart|ld\.so)|var/spool/cron|usr/lib/systemd|lib/systemd)', path):
                 r['persistence'].append({'where': path, 'detail': 'system file'})
-            elif not re.match(r'^/(etc|home|root)?$', path):
+            elif kind == 'A':
                 r['writtenOutside'].append(path)
         # The fake internet's notes.
-        r['dns'] = sorted({n for _, n in self.sink.queries})
+        r['dns'] = sorted({n for _, n in self.sink.queries if n.split('.')[0] != HOSTNAME})
         conns = {(c['ip'], c['port'], c['proto'], c['sni'], c['http'], c['host']): c for c in self.sink.connections}
         try:
             for line in (self.root / 'packets.txt').read_text().splitlines():

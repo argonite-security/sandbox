@@ -22,6 +22,11 @@ GROUP = 'argonite-net'
 ANCHOR = 'com.apple/250.ArgoniteSandbox'
 SUDO_LOCK = Path('/etc/sudoers.d/zz-argonite-sandbox')
 EXPECTED = {'java'}
+# System information the game and Java read on their own.
+EXPECTED_COMMANDS = re.compile(r'^((/usr/sbin/)?system_profiler( -\w+)* SP\w+DataType( -\w+)*|(/usr/sbin/)?sysctl( -\w+)* [\w.]+|(/usr/bin/)?sw_vers( -\w+)*|(/usr/sbin/)?ioreg( -\w+)*.*)$')
+# Names that belong to GitHub's runner and shared Microsoft front doors, which Mojang's services sit
+# behind too; an address answering to one of these can't be told apart, so it isn't named after it.
+SHARED = re.compile(r'(\.|^)(azurefd\.net|azureedge\.net|trafficmanager\.net|msedge\.net|githubusercontent\.com|github\.com|blob\.core\.windows\.net)$')
 DROP = Path(__file__).with_name('drop.py')
 
 
@@ -96,7 +101,7 @@ class MacSession(Session):
     def ours(self) -> list[tuple[str, str, str]]:
         """(pid, command, args) of every process in the test's group."""
         rows = []
-        for line in sh('ps', '-axo', 'pid=,rgid=,gid=,comm=,args=', check=False).splitlines():
+        for line in sh('ps', '-axo', 'pid=,rgid=,gid=,ucomm=,args=', check=False).splitlines():
             parts = line.split(None, 4)
             if len(parts) >= 4 and (parts[1] == str(self.gid) or parts[2] == str(self.gid)):
                 rows.append((parts[0], parts[3], parts[4] if len(parts) > 4 else ''))
@@ -146,8 +151,8 @@ class MacSession(Session):
         shown: set[str] = set()
         for info in self.seen.values():
             comm, _, args = info.partition('\t')
-            base = comm.rsplit('/', 1)[-1]
-            if base not in EXPECTED and base not in ('python3', 'python', 'launchctl') and comm not in shown:
+            base = comm.rsplit('/', 1)[-1].strip('()')
+            if base not in EXPECTED and base not in ('python3', 'python', 'launchctl', 'system_profiler') and not EXPECTED_COMMANDS.match(args.strip()) and comm not in shown:
                 shown.add(comm)
                 r['processes'].append({'exe': comm, 'args': args[:300]})
         cron = sh('crontab', '-l', '-u', self.user, check=False)
@@ -177,13 +182,14 @@ class MacSession(Session):
             a = re.search(r': (\d+)[\*\-|$]* \d+/\d+/\d+ (.*)', line)
             if a and a.group(1) in queries:
                 for ip in re.findall(r'\bA{1,4} ([0-9a-f.:]+)', a.group(2)):
-                    ips[ip.rstrip(',')] = queries[a.group(1)]
+                    ips.setdefault(ip.rstrip(','), set()).add(queries[a.group(1)])
         conns = {}
         for line in (self.root / 'pflog.txt').read_text('utf-8', 'replace').splitlines():
             m = re.search(r'IP6? \S+?\.(\d+) > (\S+)\.(\d+): (UDP|Flags|\w+)', line)
             if m:
                 ip, port = m.group(2), int(m.group(3))
                 proto = 'udp' if m.group(4) == 'UDP' else 'tcp'
-                conns[(ip, port, proto)] = {'ip': ip, 'port': port, 'proto': proto, 'host': ips.get(ip), 'sni': None, 'http': None}
+                names = sorted(n for n in ips.get(ip, set()) if not SHARED.search(n))
+                conns[(ip, port, proto)] = {'ip': ip, 'port': port, 'proto': proto, 'host': names[0] if len(names) == 1 else None, 'sni': None, 'http': None}
         r['connections'] = list(conns.values())[:300]
         r['dns'] = sorted({c['host'] for c in conns.values() if c['host']})

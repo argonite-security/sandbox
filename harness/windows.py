@@ -155,6 +155,15 @@ class WindowsSession(Session):
     def start(self, name: str, cmd: list[str], cwd: Path, log_path: Path) -> object:
         try:
             wp = WinProc(cmd, str(cwd), self.env(), str(log_path))
+            # If the game can't even start without admin rights, run it with them rather than not at all;
+            # Windows results only ever add findings, so this lowers protection, not trust.
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and wp.poll() is None:
+                time.sleep(0.2)
+            if wp.poll() is not None and log_path.stat().st_size == 0:
+                self.notes.append(f'the {name} exited at once without admin rights (code {wp.poll():#x}); ran it with them')
+                wp.kill()
+                wp = WinProc(cmd, str(cwd), self.env(), str(log_path), restricted=False)
         except OSError as e:
             self.notes.append(f'could not drop admin rights ({e}); ran with them')
             wp = WinProc(cmd, str(cwd), self.env(), str(log_path), restricted=False)

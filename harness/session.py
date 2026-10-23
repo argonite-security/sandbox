@@ -216,6 +216,7 @@ class Session:
             problems.append(f"the server didn't start{diagnose(texts['server'])}")
         if self.plan and self.plan.client and not self.report['client']['joined']:
             problems.append(f"the client didn't join{diagnose(texts['client'])}")
+        problems += self.notes
         if problems:
             self.report['error'] = '; '.join(problems)[:500]
             log('problems:', self.report['error'])
